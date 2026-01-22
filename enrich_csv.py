@@ -1,6 +1,8 @@
 import csv
 import json
 import os
+import difflib
+import re
 from google.cloud import bigquery
 
 INPUT_FILE = 'cleaned view user list.csv'
@@ -35,8 +37,8 @@ def get_clickup_maps():
     """
     client = bigquery.Client(project=PROJECT_ID)
 
-    # HubSpot company mapping is no longer needed
-    hubspot_companies = {}
+    # Fetch HubSpot companies for name resolution
+    hubspot_companies = get_hubspot_companies()
 
     # Now get ClickUp data
     query = f"""
@@ -160,6 +162,33 @@ def get_clickup_maps():
     print(f"Built HubSpot company mapping: {len(hubspot_companies)} companies")
     return org_map, name_list, task_map
 
+def get_hubspot_companies():
+    """
+    Fetches HubSpot companies from BigQuery and returns a dict mapping id to name.
+    """
+    client = bigquery.Client(project=PROJECT_ID)
+
+    query = f"""
+        SELECT
+            id,
+            properties_name
+        FROM
+            `gen-lang-client-0844868008.HubSpot_Airbyte.companies`
+        WHERE
+            properties_name IS NOT NULL
+    """
+
+    print("Fetching HubSpot companies from BigQuery...")
+    query_job = client.query(query)
+    results = query_job.result()
+
+    hubspot_map = {}
+    for row in results:
+        hubspot_map[str(row.id)] = row.properties_name.strip() if row.properties_name else ''
+
+    print(f"Fetched {len(hubspot_map)} HubSpot companies.")
+    return hubspot_map
+
 def enrich_csv():
     if not os.path.exists(INPUT_FILE):
         print(f"Error: {INPUT_FILE} not found.")
@@ -167,7 +196,8 @@ def enrich_csv():
 
     # 1. Build the maps
     org_map, name_list, task_map = get_clickup_maps()
-    print(f"Built lookup data: {len(org_map)} org codes, {len(name_list)} task names.")
+    hubspot_companies = get_hubspot_companies()
+    print(f"Built lookup data: {len(org_map)} org codes, {len(name_list)} task names, {len(hubspot_companies)} HubSpot companies.")
 
     # 2. Process CSV
     try:
@@ -184,10 +214,10 @@ def enrich_csv():
                 fieldnames.append('customer_type')
             if 'hubspot_url' not in fieldnames:
                 fieldnames.append('hubspot_url')
-            if 'hubspot_record_id' not in fieldnames:
-                fieldnames.append('hubspot_record_id')
-            if 'hubspot_company' not in fieldnames:
-                fieldnames.append('hubspot_company')
+            if 'hubspot corporation record id' not in fieldnames:
+                fieldnames.append('hubspot corporation record id')
+            if 'hubspot corporation name' not in fieldnames:
+                fieldnames.append('hubspot corporation name')
             if 'facility_task_id' not in fieldnames:
                 fieldnames.append('facility_task_id')
             if 'facility_task_name' not in fieldnames:
@@ -208,6 +238,8 @@ def enrich_csv():
                 fieldnames.append('contact_company')
             if 'match_method' not in fieldnames:
                 fieldnames.append('match_method')
+            if 'job title' not in fieldnames:
+                fieldnames.append('job title')
 
             with open(OUTPUT_FILE, mode='w', newline='', encoding='utf-8') as outfile:
                 writer = csv.DictWriter(outfile, fieldnames=fieldnames)
@@ -220,6 +252,16 @@ def enrich_csv():
                 excluded_count = 0
 
                 for row in reader:
+                    # Extract job title from last_name if it contains parentheses
+                    last_name = row.get('last_name', '')
+                    job_match = re.search(r'\((.*?)\)', last_name)
+                    if job_match:
+                        row['job title'] = job_match.group(1)
+                        # Remove the parentheses and content from last_name
+                        row['last_name'] = re.sub(r'\(.*?\)', '', last_name).strip()
+                    else:
+                        row['job title'] = ''
+
                     covr_corp = row.get('covr_corporation', '').strip()
 
                     # 0. Filter
@@ -228,6 +270,30 @@ def enrich_csv():
                         continue # Skip this row
 
                     total_count += 1
+                    user_type = row.get('View User type', '').strip()
+
+                    # Skip matching for certain user types
+                    if user_type not in ['QRM Labor - facility', 'View Labor - facility', 'View Labor - Corp', 'QRM Labor - Corp']:
+                        # Set all matching fields to empty
+                        row['task_id'] = ''
+                        row['task_status'] = ''
+                        row['customer_type'] = ''
+                        row['hubspot_url'] = ''
+                        row['hubspot corporation record id'] = ''
+                        row['hubspot corporation name'] = ''
+                        row['facility_task_id'] = ''
+                        row['facility_task_name'] = ''
+                        row['facility_corporation_task'] = ''
+                        row['facility_corporation_name'] = ''
+                        row['facility_hubspot_url'] = ''
+                        row['facility_hubspot_record_id'] = ''
+                        row['facility_hubspot_company'] = ''
+                        row['contact_record_id'] = ''
+                        row['contact_company'] = ''
+                        row['match_method'] = ''
+                        writer.writerow(row)
+                        continue
+
                     org_code = row.get('org_code', '').strip().upper()
                     norm_covr_corp = covr_corp.upper()
 
@@ -235,8 +301,8 @@ def enrich_csv():
                     task_status = ''
                     customer_type = ''
                     hubspot_url = ''
-                    hubspot_record_id = ''
-                    hubspot_company = ''
+                    hubspot_corp_record_id = ''
+                    hubspot_corp_name = ''
                     method = ''
 
                     # 1. Try Manual Alias
@@ -244,7 +310,7 @@ def enrich_csv():
                         alias_target = ORG_CODE_ALIASES[org_code]
                         task_info = org_map.get(alias_target)
                         if task_info:
-                            task_id, task_status, customer_type, hubspot_url, hubspot_record_id, hubspot_company = task_info
+                            task_id, task_status, customer_type, hubspot_url, hubspot_corp_record_id, hubspot_corp_name = task_info
                             method = f'alias({alias_target})'
                             matched_alias += 1
 
@@ -252,7 +318,7 @@ def enrich_csv():
                     if not task_id and org_code:
                         task_info = org_map.get(org_code)
                         if task_info:
-                            task_id, task_status, customer_type, hubspot_url, hubspot_record_id, hubspot_company = task_info
+                            task_id, task_status, customer_type, hubspot_url, hubspot_corp_record_id, hubspot_corp_name = task_info
                             method = 'org_code'
                             matched_org += 1
 
@@ -260,14 +326,14 @@ def enrich_csv():
                     if not task_id and norm_covr_corp in CORP_NAME_ALIASES:
                         alias_name = CORP_NAME_ALIASES[norm_covr_corp].upper()
                         # Look for exact match with the alias
-                        for cu_orig_name, cu_norm_name, cu_id, cu_status, cu_customer_type, cu_hubspot_url, cu_hubspot_record_id, cu_hubspot_company in name_list:
+                        for cu_orig_name, cu_norm_name, cu_id, cu_status, cu_customer_type, cu_hubspot_url, cu_hubspot_corp_record_id, cu_hubspot_corp_name in name_list:
                             if cu_norm_name == alias_name:
                                 task_id = cu_id
                                 task_status = cu_status
                                 customer_type = cu_customer_type
                                 hubspot_url = cu_hubspot_url
-                                hubspot_record_id = cu_hubspot_record_id
-                                hubspot_company = cu_hubspot_company
+                                hubspot_corp_record_id = cu_hubspot_corp_record_id
+                                hubspot_corp_name = cu_hubspot_corp_name
                                 method = f'name_alias({alias_name})'
                                 matched_name_fuzzy += 1  # Count as fuzzy for now
                                 break
@@ -278,20 +344,20 @@ def enrich_csv():
                         # Find best match? Or first match?
                         # We look for mutual containment: A in B OR B in A
                         # Iterating through all ClickUp task names
-                        for cu_orig_name, cu_norm_name, cu_id, cu_status, cu_customer_type, cu_hubspot_url, cu_hubspot_record_id, cu_hubspot_company in name_list:
+                        for cu_orig_name, cu_norm_name, cu_id, cu_status, cu_customer_type, cu_hubspot_url, cu_hubspot_corp_record_id, cu_hubspot_corp_name in name_list:
                             # Strict containment prevents some false positives but allows "WeCare" <-> "WeCare Health..."
                             if (norm_covr_corp in cu_norm_name) or (cu_norm_name in norm_covr_corp):
                                 task_id = cu_id
                                 task_status = cu_status
                                 customer_type = cu_customer_type
                                 hubspot_url = cu_hubspot_url
-                                hubspot_record_id = cu_hubspot_record_id
-                                hubspot_company = cu_hubspot_company
+                                hubspot_corp_record_id = cu_hubspot_corp_record_id
+                                hubspot_corp_name = cu_hubspot_corp_name
                                 method = 'name_fuzzy_match'
                                 matched_name_fuzzy += 1
                                 break # Stop after first match
 
-                    # Facility matching for single facility entries
+                    # Facility matching for single facility entries (only for facility user types)
                     facility_task_id = ''
                     facility_task_name = ''
                     facility_corporation_task = ''
@@ -301,7 +367,7 @@ def enrich_csv():
                     facility_hubspot_company = ''
 
                     facilities = row.get('facilities', '').strip()
-                    if facilities and ',' not in facilities:  # Single facility only
+                    if user_type in ['QRM Labor - facility', 'View Labor - facility'] and facilities and ',' not in facilities:  # Single facility only
                         # Perform fuzzy name matching against ClickUp company list
                         norm_facility = facilities.upper()
                         for cu_orig_name, cu_norm_name, cu_id, cu_status, cu_customer_type, cu_hubspot_url, cu_hubspot_record_id, cu_hubspot_company in name_list:
@@ -328,12 +394,31 @@ def enrich_csv():
                     contact_record_id = ''
                     contact_company = ''
 
+                    # HubSpot Company Lookup for Facility Names (for labor facility types)
+                    if user_type in ['QRM Labor - facility', 'View Labor - facility']:
+                        facility_name = row.get('facilities', '').strip()
+                        if facility_name:
+                            # Use hubspot_map (the dict) for faster lookup if possible, but keep fuzzy for now
+                            # Actually hubspot_companies is still a list in the script context? No, wait.
+                            # In enrich_csv(), hubspot_companies = get_hubspot_companies() which now returns a dict.
+                            # I need to fix how get_close_matches is called.
+                            hubspot_names = list(hubspot_companies.values())
+                            matches = difflib.get_close_matches(facility_name, hubspot_names, n=1, cutoff=0.6)
+                            if matches:
+                                matched_name = matches[0]
+                                # Find ID by value
+                                for comp_id, comp_name in hubspot_companies.items():
+                                    if comp_name == matched_name:
+                                        facility_hubspot_record_id = comp_id
+                                        facility_hubspot_company = matched_name
+                                        break
+
                     row['task_id'] = task_id
                     row['task_status'] = task_status
                     row['customer_type'] = customer_type
                     row['hubspot_url'] = hubspot_url
-                    row['hubspot_record_id'] = hubspot_record_id
-                    row['hubspot_company'] = hubspot_company
+                    row['hubspot corporation record id'] = hubspot_corp_record_id
+                    row['hubspot corporation name'] = hubspot_corp_name
                     row['facility_task_id'] = facility_task_id
                     row['facility_task_name'] = facility_task_name
                     row['facility_corporation_task'] = facility_corporation_task
