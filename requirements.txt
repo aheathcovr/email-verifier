@@ -1,0 +1,5 @@
+# Python dependencies for email processing pipeline
+# Install with: pip install -r requirements.txt
+
+google-cloud-bigquery>=3.0.0
+requests>=2.28.0
