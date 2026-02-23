@@ -291,8 +291,8 @@ def get_org_codes_from_clickup():
             # Corporate Cadence for Labor: View + Labor + active
             elif has_labor and is_active:
                 corporate_cadence_labor_orgs.add(org_code)
-            # Corporate Cadence for QRM MDS customers: View + QRM + MDS + active
-            elif has_qrm and has_mds and is_active:
+            # Corporate Cadence for QRM MDS customers: View + ONLY QRM + MDS (no other services) + active
+            elif has_qrm and has_mds and len(services) == 2 and is_active:
                 qrm_cadence_orgs.add(org_code)
             # View Clinical: View + active + NOT in any other campaign (QRM MDS or Losing Access QRM)
             elif is_active:
