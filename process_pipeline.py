@@ -132,7 +132,8 @@ def get_org_codes_from_clickup():
     
     view_clinical_orgs = set()   # View + NOT Labor + NOT QRM + active
     qrm_cadence_orgs = set()    # View + QRM + NOT Labor + active
-    other_active_orgs = set()    # View + active/implementation
+    other_active_orgs = set()    # View + active
+    in_implementation_orgs = set()  # View + implementation
     losing_access_qrm_orgs = set()  # Losing access to QRM reports
     corporate_cadence_labor_orgs = set()  # Corporate Cadence for Labor
     
@@ -299,17 +300,21 @@ def get_org_codes_from_clickup():
                 # Only add to View Clinical if not already in another campaign
                 if org_code not in losing_access_qrm_orgs and org_code not in corporate_cadence_labor_orgs and org_code not in qrm_cadence_orgs:
                     view_clinical_orgs.add(org_code)
-            # Other Active: View + active OR implementation
-            elif is_active or is_implementation:
+            # In Implementation: View + implementation status
+            elif is_implementation:
+                in_implementation_orgs.add(org_code)
+            # Other Active: View + active (fallback)
+            elif is_active:
                 other_active_orgs.add(org_code)
     
     logger.info(f"Found {len(view_clinical_orgs)} View Clinical org codes: {list(view_clinical_orgs)[:10]}...")
     logger.info(f"Found {len(qrm_cadence_orgs)} QRM Cadence org codes: {list(qrm_cadence_orgs)[:10]}...")
     logger.info(f"Found {len(other_active_orgs)} Other Active org codes: {list(other_active_orgs)[:10]}...")
+    logger.info(f"Found {len(in_implementation_orgs)} In Implementation org codes: {list(in_implementation_orgs)[:10]}...")
     logger.info(f"Found {len(losing_access_qrm_orgs)} Losing access to QRM reports org codes: {list(losing_access_qrm_orgs)[:10]}...")
     logger.info(f"Found {len(corporate_cadence_labor_orgs)} Corporate Cadence Labor org codes: {list(corporate_cadence_labor_orgs)[:10]}...")
     
-    return view_clinical_orgs, qrm_cadence_orgs, other_active_orgs, losing_access_qrm_orgs, corporate_cadence_labor_orgs
+    return view_clinical_orgs, qrm_cadence_orgs, other_active_orgs, in_implementation_orgs, losing_access_qrm_orgs, corporate_cadence_labor_orgs
 
 # =============================================================================
 # STEP 1: FILTERING
@@ -341,17 +346,18 @@ def step1_filter_rows(use_dynamic_org_codes=True):
     # Get org codes (either dynamic from ClickUp or hardcoded)
     if use_dynamic_org_codes:
         logger.info("Fetching org codes dynamically from ClickUp...")
-        view_clinical_codes, qrm_cadence_codes, other_active_codes, losing_access_qrm_codes, corporate_cadence_labor_codes = get_org_codes_from_clickup()
+        view_clinical_codes, qrm_cadence_codes, other_active_codes, in_implementation_codes, losing_access_qrm_codes, corporate_cadence_labor_codes = get_org_codes_from_clickup()
     else:
         logger.info("Using hardcoded org code sets...")
         view_clinical_codes = VIEW_LABOR_ORG_CODES
         qrm_cadence_codes = QRM_LABOR_ORG_CODES
         other_active_codes = CHURNED_VIEW_CORP_ORG_CODES
+        in_implementation_codes = set()  # No hardcoded set for this
         losing_access_qrm_codes = set()  # No hardcoded set for this
         corporate_cadence_labor_codes = set()  # No hardcoded set for this
     
     # Combine all active org codes (those to KEEP)
-    active_org_codes = view_clinical_codes | qrm_cadence_codes | other_active_codes | losing_access_qrm_codes | corporate_cadence_labor_codes
+    active_org_codes = view_clinical_codes | qrm_cadence_codes | other_active_codes | in_implementation_codes | losing_access_qrm_codes | corporate_cadence_labor_codes
     
     try:
         with open(INPUT_FILE, mode='r', newline='', encoding='utf-8-sig') as infile:
@@ -390,7 +396,7 @@ def step1_filter_rows(use_dynamic_org_codes=True):
                     org_in_active = (org_code == '') or (org_code in active_org_codes)
                     
                     # Determine campaign category
-                    # Priority order: Losing Access QRM > Customers who pay for labor reports > QRM MDS Cadence > View Clinical > Other Active
+                    # Priority order: Losing Access QRM > Customers who pay for labor reports > QRM MDS Cadence > View Clinical > In Implementation > Other Active
                     campaign = ''
                     if org_code in losing_access_qrm_codes:
                         campaign = "Losing access to QRM reports"
@@ -400,6 +406,8 @@ def step1_filter_rows(use_dynamic_org_codes=True):
                         campaign = "View Clinical customers NOT using Labor (Labor + Flow expansion)"
                     elif org_code in qrm_cadence_codes:
                         campaign = "Corporate Cadence for QRM MDS customers (Selling View labor expansion + Flow)"
+                    elif org_code in in_implementation_codes:
+                        campaign = "In Implementation"
                     elif org_code in other_active_codes:
                         campaign = "Other Active"
                     
